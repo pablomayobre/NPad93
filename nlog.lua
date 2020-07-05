@@ -46,17 +46,19 @@ if not(level) or (level < 0 or level > 4) then
 	end
 end
 
+local noop = function () end
+
 -- Default implementation
-local function infoImpl(tag, text)
+local function infoImpl(_, tag, text)
 	io.stderr:write("I[", tag, "] ", text, "\n")
 end
-local function warnImpl(tag, text)
+local function warnImpl(_, tag, text)
 	io.stderr:write("W[", tag, "] ", text, "\n")
 end
-local function errorImpl(tag, text)
+local function errorImpl(_, tag, text)
 	io.stderr:write("E[", tag, "] ", text, "\n")
 end
-local function debugImpl(tag, text)
+local function debugImpl(_, tag, text)
 	io.stderr:write("D[", tag, "] ", text, "\n")
 end
 
@@ -66,15 +68,15 @@ local function setupANSICode()
 		return string.format("\27[%dm", n)
 	end
 
-	function warnImpl(tag, text)
+	function warnImpl(_, tag, text)
 		io.stderr:write(m(1), m(33), "W[", tag, "] ", text, m(0), "\n")
 	end
 
-	function errorImpl(tag, text)
+	function errorImpl(_, tag, text)
 		io.stderr:write(m(31), "E[", tag, "] ", text, m(0), "\n")
 	end
 
-	function debugImpl(tag, text)
+	function debugImpl(_, tag, text)
 		io.stderr:write(m(1), m(37), "D[", tag, "] ", text, m(0), "\n")
 	end
 end
@@ -138,21 +140,21 @@ if love._os == "Windows" then
 					ffi.fill(csbi[0], ffi.sizeof("logging_CSBI"), 0)
 				end
 
-				function warnImpl(tag, text)
+				function warnImpl(_, tag, text)
 					local m = pushMode(0x0004+0x0002+0x0008) -- bright yellow
 					io.stderr:write("W[", tag, "] ", text, "\n")
 					io.stderr:flush()
 					popMode(m)
 				end
 
-				function errorImpl(tag, text)
+				function errorImpl(_, tag, text)
 					local m = pushMode(0x0004) -- red
 					io.stderr:write("E[", tag, "] ", text, "\n")
 					io.stderr:flush()
 					popMode(m)
 				end
 
-				function debugImpl(tag, text)
+				function debugImpl(_, tag, text)
 					local m = pushMode(0x0004+0x0002+0x0001+0x0008) -- bright white
 					io.stderr:write("D[", tag, "] ", text, "\n")
 					io.stderr:flush()
@@ -187,131 +189,98 @@ elseif love._os == "Android" then
 		int __android_log_write(enum AndroidLogPriority, const char *tag, const char *text);
 		]]
 
-		function infoImpl(tag, text)
+		function infoImpl(_, tag, text)
 			androidLog.__android_log_write("info", tag, text)
 		end
 
-		function warnImpl(tag, text)
+		function warnImpl(_, tag, text)
 			androidLog.__android_log_write("warning", tag, text)
 		end
 
-		function errorImpl(tag, text)
+		function errorImpl(_, tag, text)
 			androidLog.__android_log_write("error", tag, text)
 		end
 
-		function debugImpl(tag, text)
+		function debugImpl(_, tag, text)
 			androidLog.__android_log_write("debug", tag, text)
 		end
 	else
 		-- Screw this, use print and hope for the best
-		function infoImpl(tag, text)
+		function infoImpl(_, tag, text)
 			print("I["..tag.."] "..text.."\n")
 		end
 
-		function warnImpl(tag, text)
+		function warnImpl(_, tag, text)
 			print("W["..tag.."] "..text.."\n")
 		end
 
-		function errorImpl(tag, text)
+		function errorImpl(_, tag, text)
 			print("E["..tag.."] "..text.."\n")
 		end
 
-		function debugImpl(tag, text)
+		function debugImpl(_, tag, text)
 			print("D["..tag.."] "..text.."\n")
 		end
 	end
 end
 
-local function infoImplMutex(_, tag, text)
-	return infoImpl(tag, text)
-end
-
-local function warnImplMutex(_, tag, text)
-	return warnImpl(tag, text)
-end
-
-local function errorImplMutex(_, tag, text)
-	return errorImpl(tag, text)
-end
-
-local function debugImplMutex(_, tag, text)
-	return debugImpl(tag, text)
-end
-
-local function initMutex()
-	if not(log.mutex) and love.thread then
-		-- Lock
-		log.mutex = love.thread.getChannel("logging.lock")
+local function atomic(f, ...)
+	if love.thread then
+		if not(log.mutex) then
+			-- Lock
+			log.mutex = love.thread.getChannel("logging.lock")
+		end
+		log.mutex:performAtomic(f, ...)
 	end
 
-	return not(not(log.mutex))
+	return f(...)
 end
 
-function log.info(tag, text)
-	if level >= 3 then
-		if initMutex() then
-			return log.mutex:performAtomic(infoImplMutex, tag, text)
-		else
-			return infoImpl(tag, text)
-		end
+function log.info (tag, text, ...)
+	atomic(infoImpl, tag, string.format(text, ...))
+end
+
+if level < 3 then
+	log.info = noop
+end
+log.infof = log.info
+
+function log.warning(tag, text, ...)
+	if level >= 4 then
+		text = debug.traceback(string.format(text, ...), 2)
 	end
+
+	atomic(warnImpl, tag, text)
 end
 
-function log.infof(tag, text, ...)
-	return log.info(tag, string.format(text, ...))
-end
-
-function log.warning(tag, text)
-	if level >= 2 then
-		if level >= 4 then
-			text = debug.traceback(text, 2)
-		end
-
-		if initMutex() then
-			return log.mutex:performAtomic(warnImplMutex, tag, text)
-		else
-			return warnImpl(tag, text)
-		end
-	end
+if level < 2 then
+	log.warning = noop
 end
 log.warn = log.warning
+log.warningf = log.warning
+log.warnf = log.warning
 
-function log.warningf(tag, text, ...)
-	return log.warning(tag, string.format(text, ...))
-end
-log.warnf = log.warningf
-
-function log.error(tag, text)
-	if level >= 1 then
-		if level >= 4 then
-			text = debug.traceback(text, 2)
-		end
-
-		if initMutex() then
-			return log.mutex:performAtomic(errorImplMutex, tag, text)
-		else
-			return errorImpl(tag, text)
-		end
-	end
-end
-
-function log.errorf(tag, text, ...)
-	return log.error(tag, string.format(text, ...))
-end
-
-function log.debug(tag, text)
+function log.error(tag, text, ...)
 	if level >= 4 then
-		if initMutex() then
-			return log.mutex:performAtomic(debugImplMutex, tag, text)
-		else
-			return debugImpl(tag, text)
-		end
+		text = debug.traceback(string.format(text, ...), 2)
 	end
+
+	atomic(errorImpl, tag, text)
 end
 
-function log.debugf(tag, text, ...)
-	return log.debug(tag, string.format(text, ...))
+if level < 1 then
+	log.error = noop
 end
+log.errorf = log.error
+
+function log.debug(tag, text, ...)
+	atomic(debugImpl, tag, string.format(text, ...))
+end
+
+if level < 4 then
+	log.debug = noop
+end
+log.debugf = log.debug
 
 function log.getLevel()
 	return level
